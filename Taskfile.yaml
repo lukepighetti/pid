@@ -1,0 +1,4 @@
+version: '3'
+
+tasks:
+  watch: npx -y nodemon -w bin -e 'dart' -x 'dart bin/pid.dart'
