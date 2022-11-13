@@ -1,17 +1,61 @@
+import 'dart:convert';
+import 'dart:io';
+
 import 'package:mqtt_client/mqtt_client.dart';
 import 'package:mqtt_client/mqtt_server_client.dart';
 
 const tempTopic = "esphome/woodstove/sensor/woodstove_flue_temperature/state";
 
-var p_factor = -0.008;
-var p_offset = 0.5;
+double d_factor(double d) => 0.1 * d;
+double i_factor(double i) => -0.00005 * i;
+double p_factor(double err) => -0.008 * err + 0.5;
+var d_span = Duration(minutes: 1);
+var expire_span = Duration(minutes: 15);
+var i_span = Duration(minutes: 5);
 var s_max = 0.9;
 var s_min = 0.3;
-var setPoint = 200;
+var setPoint = 80;
+var t_noise = Band(-1.4, 0.8);
+
+class State {
+  var rawHistory = <Timestamped<double>>[];
+  var smaHistory = <Timestamped<double>>[];
+  var inbandHistory = <Timestamped<double>>[];
+  var errHistory = <Timestamped<double>>[];
+
+  static final _file = File('state.json');
+
+  Future<void> save() async {
+    _file.writeAsString(jsonEncode({
+      'errHistory': TimestampedListSerializer.toJson(errHistory),
+      'inbandHistory': TimestampedListSerializer.toJson(inbandHistory),
+      'rawHistory': TimestampedListSerializer.toJson(rawHistory),
+      'smaHistory': TimestampedListSerializer.toJson(smaHistory),
+    }));
+  }
+
+  Future<void> load() async {
+    final d = _file.readAsStringSync().let(jsonDecode);
+    errHistory = TimestampedListSerializer.fromJson(d['errHistory']);
+    inbandHistory = TimestampedListSerializer.fromJson(d['inbandHistory']);
+    rawHistory = TimestampedListSerializer.fromJson(d['rawHistory']);
+    smaHistory = TimestampedListSerializer.fromJson(d['smaHistory']);
+  }
+
+  void expire() {
+    errHistory.expire(expire_span);
+    inbandHistory.expire(expire_span);
+    rawHistory.expire(expire_span);
+    smaHistory.expire(expire_span);
+  }
+}
 
 final s_lerp = lerp(s_min, s_max);
 
+final s = State();
+
 Future<void> main(List<String> arguments) async {
+  await s.load();
   final client = MqttServerClient('imac.local', '');
   client.setProtocolV311();
   client.keepAlivePeriod = 30;
@@ -22,29 +66,126 @@ Future<void> main(List<String> arguments) async {
     client.subscribe(topic, MqttQos.atMostOnce);
   }
 
-  print(csv_row(['temp', 'err', 'p_val', 's', 's_val']));
+  print(csv_row([
+    't',
+    't_band',
+    'err',
+    'p_val',
+    'i',
+    'i_val',
+    'd',
+    'd_val',
+    'x',
+    'x_val'
+  ]));
 
-  await for (final batch in client.updates!) {
-    for (final message in batch) {
-      final p = message.payload;
-      if (p is! MqttPublishMessage) continue;
-      final pt = MqttPublishPayload.bytesToStringAsString(p.payload.message);
-      switch (message.topic) {
-        case tempTopic:
-          final t = pt.let(double.tryParse)?.let(c_to_f);
-          if (t == null) continue;
-          final err = t - setPoint;
-          final p_val = p_factor * err + p_offset;
-          final s = p_val;
-          final s_val = s.clamp(0.0, 1.0).let(s_lerp);
+  Future<void> _listen() async {
+    await for (final batch in client.updates!) {
+      for (final message in batch) {
+        final p = message.payload;
+        if (p is! MqttPublishMessage) continue;
+        final pt = MqttPublishPayload.bytesToStringAsString(p.payload.message);
+        switch (message.topic) {
+          case tempTopic:
+            final t = pt.let(double.tryParse)?.let(c_to_f);
+            if (t == null) continue;
+            s.rawHistory.add(Timestamped.now(t));
+            final t_sma = s.rawHistory.average(Duration(seconds: 60));
+            s.smaHistory.add(Timestamped.now(t_sma));
+            final t_band = get_t_band(t);
+            s.inbandHistory.add(Timestamped.now(t_band));
 
-          print(csv_row([t, err, p_val, s, s_val]));
-          break;
-        default:
-          print('<${message.topic}>: $pt');
+            final err = t_band - setPoint;
+            s.errHistory.add(Timestamped.now(err));
+
+            final p_val = p_factor(err);
+            final i = s.errHistory.integral(i_span);
+            final i_val = i_factor(i);
+            final d = s.inbandHistory.derivative(d_span) ?? -0;
+            final d_val = d_factor(d);
+
+            final x = p_val + i_val + d_val;
+            final x_val = x.clamp(0.0, 1.0).let(s_lerp);
+
+            print(csv_row([
+              t,
+              t_band,
+              err,
+              p_val,
+              i,
+              i_val,
+              d,
+              d_val,
+              x,
+              x_val,
+            ]));
+            s.expire();
+            s.save();
+            break;
+          default:
+            print('<${message.topic}>: $pt');
+        }
       }
     }
   }
+
+  try {
+    _listen();
+  } on SocketException catch (e) {
+    print("ERR: $e");
+  }
+}
+
+extension ListTimestamped<T> on List<Timestamped<T>> {
+  void expire(Duration limit) {
+    removeWhere((e) => e.time.isBefore(DateTime.now().subtract(limit)));
+  }
+
+  List<Timestamped<T>> window(Duration limit) {
+    final list = [...this];
+    list.expire(limit);
+    return list;
+  }
+}
+
+extension ListTimestampedDouble on List<Timestamped<double>> {
+  double? derivative(
+    Duration window, {
+    Duration timeUnit = const Duration(minutes: 1),
+  }) {
+    final windowedData = this.window(window);
+    if (windowedData.length < 2) return null;
+    final dy = windowedData.last.value - windowedData.first.value;
+    final dx = windowedData.last.time.difference(windowedData.first.time);
+    if (dx == 0) return null;
+    final dydx = dy / dx.inDecimalSeconds;
+    if (dydx.isNaN) return null;
+    return dydx * timeUnit.inDecimalSeconds;
+  }
+
+  double integral(Duration window) {
+    final windowedData = this.window(window);
+    var result = 0.0;
+    for (var i = 1; i < windowedData.length; i++) {
+      final a = windowedData[i - 1];
+      final b = windowedData[i];
+      final dt = b.time.difference(a.time).inDecimalSeconds;
+      result += ((a.value + b.value) / 2) * dt;
+    }
+    return result;
+  }
+
+  double average(Duration window) {
+    final windowedData = this.window(window);
+    final sum = windowedData.fold<double>(0, (a, b) => a + b.value);
+    return sum / windowedData.length;
+  }
+}
+
+class DerivativeResult {
+  DerivativeResult(this.value, this.window);
+  final double value;
+  final Duration window;
 }
 
 extension Let<T> on T {
@@ -52,12 +193,52 @@ extension Let<T> on T {
 }
 
 double c_to_f(double c) => c * 9 / 5 + 32;
+
 double Function(double) lerp(double a, double b) => (t) => a + (b - a) * t;
-String csv_row(List<Object> values) => values.map((it) {
+
+String csv_row(List<Object?> values) => values.map((it) {
       const padding = 6;
-      if (it is String) {
-        return it.toString().padLeft(padding);
-      } else if (it is num) {
+      if (it is num) {
         return it.toStringAsPrecision(3).padLeft(padding);
+      } else {
+        return it.toString().padLeft(padding);
       }
     }).join(",");
+
+class Timestamped<T> {
+  Timestamped.now(this.value) : time = DateTime.now().toUtc();
+  Timestamped(this.time, this.value);
+  final DateTime time;
+  final T value;
+}
+
+class Band {
+  Band(this.min, this.max);
+  final double min;
+  final double max;
+  bool outOfBand(double last, double next) =>
+      (next - last) < min || (last - next) > max;
+}
+
+double get_t_band(double t) {
+  if (s.inbandHistory.isEmpty) return t;
+  if (t_noise.outOfBand(s.inbandHistory.last.value, t)) return t;
+  return s.inbandHistory.last.value;
+}
+
+extension on Duration {
+  double get inDecimalSeconds => inMicroseconds * 1e-6;
+}
+
+class TimestampedListSerializer {
+  static dynamic toJson(List<Timestamped<double>> list) {
+    return list.map((e) => [e.time.toIso8601String(), e.value]).toList();
+  }
+
+  // List<List<double>>
+  static List<Timestamped<double>> fromJson(List<dynamic> json) {
+    return json
+        .map((e) => Timestamped<double>(DateTime.parse(e[0]), e[1]))
+        .toList();
+  }
+}
