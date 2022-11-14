@@ -21,13 +21,17 @@ class State {
   static final _file = File('state.json');
 
   Future<void> save() async {
-    _file.writeAsString(jsonEncode({
+    _file.writeAsStringSync(jsonEncode({
       'errHistory': TimestampedListSerializer.toJson(errHistory),
       'rawHistory': TimestampedListSerializer.toJson(rawHistory),
     }));
   }
 
   Future<void> load() async {
+    if (!_file.existsSync()) {
+      _file.createSync();
+      await save();
+    }
     final d = _file.readAsStringSync().let(jsonDecode);
     errHistory = TimestampedListSerializer.fromJson(d['errHistory']);
     rawHistory = TimestampedListSerializer.fromJson(d['rawHistory']);

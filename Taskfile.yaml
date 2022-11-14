@@ -1,4 +1,8 @@
 version: '3'
 
 tasks:
+  docker:build: docker build -t pid .
+  docker:interactive: docker run --volume "$PWD/state.json:/state.json" --rm --name pid -it pid
+  docker:kill: docker kill pid
+  serve: npx -y nodemon -w bin -e 'dart' -x 'dart bin/pid.dart || touch bin/pid.dart'
   watch: npx -y nodemon -w bin -e 'dart' -x 'dart bin/pid.dart'
