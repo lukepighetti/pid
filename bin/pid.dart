@@ -11,14 +11,11 @@ var d_span = Duration(minutes: 1);
 var expire_span = Duration(minutes: 15);
 var i_span = Duration(minutes: 2);
 var sma_span = Duration(seconds: 60);
-var t_noise = Band(-1.4, 0.8);
 var t_set = 300;
 var x_lerp = lerp(0.3, 0.95);
 
 class State {
   var rawHistory = <Timestamped<double>>[];
-  var smaHistory = <Timestamped<double>>[];
-  var inbandHistory = <Timestamped<double>>[];
   var errHistory = <Timestamped<double>>[];
 
   static final _file = File('state.json');
@@ -26,25 +23,19 @@ class State {
   Future<void> save() async {
     _file.writeAsString(jsonEncode({
       'errHistory': TimestampedListSerializer.toJson(errHistory),
-      'inbandHistory': TimestampedListSerializer.toJson(inbandHistory),
       'rawHistory': TimestampedListSerializer.toJson(rawHistory),
-      'smaHistory': TimestampedListSerializer.toJson(smaHistory),
     }));
   }
 
   Future<void> load() async {
     final d = _file.readAsStringSync().let(jsonDecode);
     errHistory = TimestampedListSerializer.fromJson(d['errHistory']);
-    inbandHistory = TimestampedListSerializer.fromJson(d['inbandHistory']);
     rawHistory = TimestampedListSerializer.fromJson(d['rawHistory']);
-    smaHistory = TimestampedListSerializer.fromJson(d['smaHistory']);
   }
 
   void expire() {
     errHistory.expire(expire_span);
-    inbandHistory.expire(expire_span);
     rawHistory.expire(expire_span);
-    smaHistory.expire(expire_span);
   }
 }
 
@@ -64,18 +55,8 @@ Future<void> main(List<String> arguments) async {
     client.subscribe(topic, MqttQos.atMostOnce);
   }
 
-  print(csv_row([
-    't',
-    't_band',
-    'err',
-    'p_val',
-    'i',
-    'i_val',
-    'd',
-    'd_val',
-    'x',
-    'x_val'
-  ]));
+  print(csv_row(
+      ['t', 't_err', 'p_val', 'i', 'i_val', 'd', 'd_val', 'x', 'x_val']));
 
   Future<void> _listen() async {
     await for (final batch in client.updates!) {
@@ -88,35 +69,20 @@ Future<void> main(List<String> arguments) async {
             final t = pt.let(double.tryParse)?.let(c_to_f);
             if (t == null) continue;
             s.rawHistory.add(Timestamped.now(t));
-            final t_sma = s.rawHistory.average(sma_span);
-            s.smaHistory.add(Timestamped.now(t_sma));
-            final t_band = get_t_band(t);
-            s.inbandHistory.add(Timestamped.now(t_band));
 
-            final err = t_band - t_set;
-            s.errHistory.add(Timestamped.now(err));
+            final t_err = t - t_set;
+            s.errHistory.add(Timestamped.now(t_err));
 
-            final p_val = p_factor(err);
+            final p_val = p_factor(t_err);
             final i = s.errHistory.integral(i_span);
             final i_val = i_factor(i);
-            final d = s.inbandHistory.derivative(d_span) ?? -0;
+            final d = s.rawHistory.derivative(d_span) ?? -0;
             final d_val = d_factor(d);
 
             final x = p_val + i_val + d_val;
             final x_val = x.clamp(0.0, 1.0).let(x_lerp);
 
-            print(csv_row([
-              t,
-              t_band,
-              err,
-              p_val,
-              i,
-              i_val,
-              d,
-              d_val,
-              x,
-              x_val,
-            ]));
+            print(csv_row([t, t_err, p_val, i, i_val, d, d_val, x, x_val]));
             s.expire();
             s.save();
             setTemp(x_val);
@@ -196,7 +162,7 @@ double c_to_f(double c) => c * 9 / 5 + 32;
 double Function(double) lerp(double a, double b) => (t) => a + (b - a) * t;
 
 String csv_row(List<Object?> values) => values.map((it) {
-      const padding = 6;
+      const padding = 7;
       if (it is num) {
         return it.toStringAsPrecision(3).padLeft(padding);
       } else {
@@ -211,20 +177,6 @@ class Timestamped<T> {
   final T value;
 }
 
-class Band {
-  Band(this.min, this.max);
-  final double min;
-  final double max;
-  bool outOfBand(double last, double next) => true;
-  // (next - last) < min || (last - next) > max;
-}
-
-double get_t_band(double t) {
-  if (s.inbandHistory.isEmpty) return t;
-  if (t_noise.outOfBand(s.inbandHistory.last.value, t)) return t;
-  return s.inbandHistory.last.value;
-}
-
 extension on Duration {
   double get inDecimalSeconds => inMicroseconds * 1e-6;
 }
@@ -234,7 +186,6 @@ class TimestampedListSerializer {
     return list.map((e) => [e.time.toIso8601String(), e.value]).toList();
   }
 
-  // List<List<double>>
   static List<Timestamped<double>> fromJson(List<dynamic> json) {
     return json
         .map((e) => Timestamped<double>(DateTime.parse(e[0]), e[1]))
