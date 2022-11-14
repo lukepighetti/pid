@@ -5,7 +5,7 @@ import 'package:mqtt_client/mqtt_client.dart';
 import 'package:mqtt_client/mqtt_server_client.dart';
 
 double d_factor(double d) => (-0.015 * d).clamp(-0.2, 0.2);
-double i_factor(double i) => (-0.00005 * i).clamp(-0.3, 0.3);
+double i_factor(double i) => (-0.00007 * i).clamp(-0.3, 0.3);
 double p_factor(double err) => (-0.005 * err).clamp(-0.5, 0.5) + 0.002 * t_set;
 var d_span = Duration(minutes: 1);
 var expire_span = Duration(minutes: 15);
