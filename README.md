@@ -1,2 +1,5 @@
-A sample command-line application with an entrypoint in `bin/`, library code
-in `lib/`, and example unit test in `test/`.
+# pid
+
+A woodstove PID controller written in Dart / MQTT.
+
+A related [tweet](https://twitter.com/luke_pighetti/status/1591919866847854593)
