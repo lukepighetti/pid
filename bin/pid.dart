@@ -4,18 +4,16 @@ import 'dart:io';
 import 'package:mqtt_client/mqtt_client.dart';
 import 'package:mqtt_client/mqtt_server_client.dart';
 
-const tempTopic = "esphome/woodstove/sensor/woodstove_flue_temperature/state";
-
-double d_factor(double d) => 0.1 * d;
-double i_factor(double i) => -0.00005 * i;
-double p_factor(double err) => -0.008 * err + 0.5;
+double d_factor(double d) => (-0.015 * d).clamp(-0.2, 0.2);
+double i_factor(double i) => (-0.00005 * i).clamp(-0.3, 0.3);
+double p_factor(double err) => (-0.005 * err).clamp(-0.5, 0.5) + 0.002 * t_set;
 var d_span = Duration(minutes: 1);
 var expire_span = Duration(minutes: 15);
-var i_span = Duration(minutes: 5);
-var s_max = 0.9;
-var s_min = 0.3;
-var setPoint = 80;
+var i_span = Duration(minutes: 2);
+var sma_span = Duration(seconds: 60);
 var t_noise = Band(-1.4, 0.8);
+var t_set = 300;
+var x_lerp = lerp(0.3, 0.95);
 
 class State {
   var rawHistory = <Timestamped<double>>[];
@@ -50,17 +48,17 @@ class State {
   }
 }
 
-final s_lerp = lerp(s_min, s_max);
-
 final s = State();
+
+final client = MqttServerClient('imac.local', '');
 
 Future<void> main(List<String> arguments) async {
   await s.load();
-  final client = MqttServerClient('imac.local', '');
   client.setProtocolV311();
   client.keepAlivePeriod = 30;
   await client.connect();
 
+  const tempTopic = "esphome/woodstove/sensor/woodstove_flue_temperature/state";
   final topics = [tempTopic];
   for (final topic in topics) {
     client.subscribe(topic, MqttQos.atMostOnce);
@@ -90,12 +88,12 @@ Future<void> main(List<String> arguments) async {
             final t = pt.let(double.tryParse)?.let(c_to_f);
             if (t == null) continue;
             s.rawHistory.add(Timestamped.now(t));
-            final t_sma = s.rawHistory.average(Duration(seconds: 60));
+            final t_sma = s.rawHistory.average(sma_span);
             s.smaHistory.add(Timestamped.now(t_sma));
             final t_band = get_t_band(t);
             s.inbandHistory.add(Timestamped.now(t_band));
 
-            final err = t_band - setPoint;
+            final err = t_band - t_set;
             s.errHistory.add(Timestamped.now(err));
 
             final p_val = p_factor(err);
@@ -105,7 +103,7 @@ Future<void> main(List<String> arguments) async {
             final d_val = d_factor(d);
 
             final x = p_val + i_val + d_val;
-            final x_val = x.clamp(0.0, 1.0).let(s_lerp);
+            final x_val = x.clamp(0.0, 1.0).let(x_lerp);
 
             print(csv_row([
               t,
@@ -121,6 +119,7 @@ Future<void> main(List<String> arguments) async {
             ]));
             s.expire();
             s.save();
+            setTemp(x_val);
             break;
           default:
             print('<${message.topic}>: $pt');
@@ -216,8 +215,8 @@ class Band {
   Band(this.min, this.max);
   final double min;
   final double max;
-  bool outOfBand(double last, double next) =>
-      (next - last) < min || (last - next) > max;
+  bool outOfBand(double last, double next) => true;
+  // (next - last) < min || (last - next) > max;
 }
 
 double get_t_band(double t) {
@@ -241,4 +240,11 @@ class TimestampedListSerializer {
         .map((e) => Timestamped<double>(DateTime.parse(e[0]), e[1]))
         .toList();
   }
+}
+
+void setTemp(double x) {
+  final builder = MqttClientPayloadBuilder()
+    ..addString(jsonEncode({"state": "ON", "brightness": 255 - x * 255}));
+  client.publishMessage('esphome/development/light/linear_servo/command',
+      MqttQos.atLeastOnce, builder.payload!);
 }
