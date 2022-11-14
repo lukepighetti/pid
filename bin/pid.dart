@@ -18,7 +18,7 @@ class State {
   var rawHistory = <Timestamped<double>>[];
   var errHistory = <Timestamped<double>>[];
 
-  static final _file = File('state.json');
+  static final _file = File('data/state.json');
 
   Future<void> save() async {
     _file.writeAsStringSync(jsonEncode({
@@ -29,9 +29,10 @@ class State {
 
   Future<void> load() async {
     if (!_file.existsSync()) {
-      _file.createSync();
+      _file.createSync(recursive: true);
       await save();
     }
+
     final d = _file.readAsStringSync().let(jsonDecode);
     errHistory = TimestampedListSerializer.fromJson(d['errHistory']);
     rawHistory = TimestampedListSerializer.fromJson(d['rawHistory']);
