@@ -6,17 +6,18 @@ import 'package:mqtt_client/mqtt_server_client.dart';
 
 double d_factor(double d) => (-0.015 * d).clamp(-0.2, 0.2);
 double i_factor(double i) => (-0.00007 * i).clamp(-0.3, 0.3);
-double p_factor(double err) => (-0.005 * err).clamp(-0.5, 0.5) + 0.002 * t_set;
+double p_factor(double e) => (-0.005 * e).clamp(-0.5, 0.5) + 0.002 * t_set();
 var d_span = Duration(minutes: 1);
 var expire_span = Duration(minutes: 15);
 var i_span = Duration(minutes: 2);
 var sma_span = Duration(seconds: 60);
-var t_set = 300;
+double t_set() => s.t_set.clamp(300, 500).toDouble();
 var x_lerp = lerp(0.3, 0.95);
 
 class State {
   var rawHistory = <Timestamped<double>>[];
   var errHistory = <Timestamped<double>>[];
+  var t_set = 300.0;
 
   static final _file = File('data/state.json');
 
@@ -24,6 +25,7 @@ class State {
     _file.writeAsStringSync(jsonEncode({
       'errHistory': TimestampedListSerializer.toJson(errHistory),
       'rawHistory': TimestampedListSerializer.toJson(rawHistory),
+      'tSet': t_set,
     }));
   }
 
@@ -36,6 +38,7 @@ class State {
     final d = _file.readAsStringSync().let(jsonDecode);
     errHistory = TimestampedListSerializer.fromJson(d['errHistory']);
     rawHistory = TimestampedListSerializer.fromJson(d['rawHistory']);
+    t_set = d['tSet'];
   }
 
   void expire() {
@@ -54,14 +57,25 @@ Future<void> main(List<String> arguments) async {
   client.keepAlivePeriod = 30;
   await client.connect();
 
-  const tempTopic = "esphome/woodstove/sensor/woodstove_flue_temperature/state";
-  final topics = [tempTopic];
+  const flueTopic = "esphome/woodstove/sensor/woodstove_flue_temperature/state";
+  const setTopic = "pid/t_set";
+  final topics = [flueTopic, setTopic];
   for (final topic in topics) {
     client.subscribe(topic, MqttQos.atMostOnce);
   }
 
-  print(csv_row(
-      ['t', 't_err', 'p_val', 'i', 'i_val', 'd', 'd_val', 'x', 'x_val']));
+  print(csv_row([
+    't',
+    't_set',
+    't_err',
+    'p_val',
+    'i',
+    'i_val',
+    'd',
+    'd_val',
+    'x',
+    'x_val',
+  ]));
 
   Future<void> _listen() async {
     await for (final batch in client.updates!) {
@@ -70,12 +84,12 @@ Future<void> main(List<String> arguments) async {
         if (p is! MqttPublishMessage) continue;
         final pt = MqttPublishPayload.bytesToStringAsString(p.payload.message);
         switch (message.topic) {
-          case tempTopic:
+          case flueTopic:
             final t = pt.let(double.tryParse)?.let(c_to_f);
             if (t == null) continue;
             s.rawHistory.add(Timestamped.now(t));
-
-            final t_err = t - t_set;
+            final t_setpoint = t_set();
+            final t_err = t - t_setpoint;
             s.errHistory.add(Timestamped.now(t_err));
 
             final p_val = p_factor(t_err);
@@ -87,11 +101,31 @@ Future<void> main(List<String> arguments) async {
             final x = p_val + i_val + d_val;
             final x_val = x.clamp(0.0, 1.0).let(x_lerp);
 
-            print(csv_row([t, t_err, p_val, i, i_val, d, d_val, x, x_val]));
+            print(csv_row([
+              t,
+              t_setpoint,
+              t_err,
+              p_val,
+              i,
+              i_val,
+              d,
+              d_val,
+              x,
+              x_val,
+            ]));
+
             s.expire();
             s.save();
             setTemp(x_val);
             break;
+
+          case setTopic:
+            final t = pt.let(double.tryParse);
+            if (t == null) continue;
+            s.t_set = t;
+            s.save();
+            break;
+
           default:
             print('<${message.topic}>: $pt');
         }
