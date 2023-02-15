@@ -11,7 +11,7 @@ var d_span = Duration(minutes: 1);
 var expire_span = Duration(minutes: 15);
 var i_span = Duration(minutes: 2);
 var sma_span = Duration(seconds: 60);
-double t_set() => s.t_set.clamp(300, 500).toDouble();
+double t_set() => s.t_set.clamp(275, 500).toDouble();
 var x_lerp = lerp(0.5, 0.95);
 
 class State {
